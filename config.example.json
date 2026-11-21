@@ -1,0 +1,11 @@
+{
+  "cooldown_seconds": 60,
+  "whois_cache_ttl_hours": 24,
+  "whois_timeout_seconds": 4,
+  "urgency": 2,
+  "whitelist_cidrs": [
+    "127.0.0.1/32",
+    "::1/128",
+    "192.168.1.0/24"
+  ]
+}
