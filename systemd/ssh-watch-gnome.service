@@ -1,0 +1,13 @@
+[Unit]
+Description=SSH Guard GNOME Notifier
+After=network.target graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/ssh-watch-gnome
+Restart=always
+RestartSec=5s
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:%h/.local/bin
+
+[Install]
+WantedBy=default.target
