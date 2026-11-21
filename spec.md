@@ -60,8 +60,10 @@ El sistema debe leer el flujo `journalctl -u ssh -u sshd -f -n 0 -o cat` y parse
   IP: 203.0.113.45 (CN)
   Usuario: root
   Organización: China Telecom (AS4134)
+  AbuseIPDB: 100% confianza (42 reportes)
   Intentos detectados: 1
   ```
+  *(La línea `AbuseIPDB` solo se muestra cuando la integración está habilitada y devuelve datos).*
 
 ### RF-06: Configuración del Sistema
 Soporte para cargar opciones desde `~/.config/ssh-watch-gnome/config.json`:
@@ -75,9 +77,29 @@ Soporte para cargar opciones desde `~/.config/ssh-watch-gnome/config.json`:
     "127.0.0.1/32",
     "::1/128",
     "192.168.1.0/24"
-  ]
+  ],
+  "abuseipdb": {
+    "enabled": false,
+    "api_key": "",
+    "max_age_in_days": 90,
+    "cache_ttl_hours": 24,
+    "timeout_seconds": 4,
+    "report_enabled": false,
+    "report_min_attempts": 3
+  }
 }
 ```
+
+### RF-07: Integración con AbuseIPDB (Opcional)
+* **Consulta asíncrona (`GET https://api.abuseipdb.com/api/v2/check`):**
+  * Se ejecuta en paralelo junto a WHOIS con un `context.WithTimeout` (`abuseipdb.timeout_seconds`, por defecto **4 segundos**).
+  * Autenticación mediante cabecera HTTP `Key` (soporta fallback a la variable de entorno `ABUSEIPDB_API_KEY` si `api_key` está vacío) y `Accept: application/json`.
+  * Extrae `abuseConfidenceScore`, `totalReports`, `countryCode`, `isp` e `isTor`. Si WHOIS no devuelve país u organización, se usan `countryCode` / `isp` de AbuseIPDB como respaldo.
+  * **Caché TTL:** Almacenar respuestas exitosas en una estructura thread-safe durante `cache_ttl_hours` (por defecto 24h) para respetar la cuota gratuita de 1,000 peticiones/día.
+  * **Degradación elegante:** Errores de red o límite de cuota (`HTTP 429`) no bloquean ni cancelan la notificación de escritorio.
+* **Reporte automático opcional (`POST https://api.abuseipdb.com/api/v2/report`):**
+  * Si `report_enabled` es `true` y los intentos alcanzan `report_min_attempts`, reporta la IP con categorías `18,22` (*Brute-Force*, *SSH*).
+  * Aplica un enfriamiento mínimo de **15 minutos por IP** para cumplir con las políticas de la API de AbuseIPDB.
 
 ---
 
@@ -105,6 +127,7 @@ ssh-watch-gnome/
 │   └── ssh-watch-gnome/
 │       └── main.go               # Punto de entrada y orquestación
 └── internal/
+    ├── abuseipdb/                # Cliente HTTP APIv2 (check/report) con caché TTL
     ├── config/                   # Carga y parsing de config.json
     ├── logwatcher/               # Streaming y regex de journalctl
     ├── whois/                    # Cliente WHOIS con contexto y caché TTL

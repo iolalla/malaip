@@ -7,5 +7,14 @@
     "127.0.0.1/32",
     "::1/128",
     "192.168.1.0/24"
-  ]
+  ],
+  "abuseipdb": {
+    "enabled": false,
+    "api_key": "",
+    "max_age_in_days": 90,
+    "cache_ttl_hours": 24,
+    "timeout_seconds": 4,
+    "report_enabled": false,
+    "report_min_attempts": 3
+  }
 }

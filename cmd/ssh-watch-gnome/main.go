@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"ssh-watch-gnome/internal/abuseipdb"
 	"ssh-watch-gnome/internal/config"
 	"ssh-watch-gnome/internal/limiter"
 	"ssh-watch-gnome/internal/logwatcher"
@@ -42,8 +43,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("Fatal configuration error: %v", err)
 	}
-	log.Printf("Configuration loaded: Cooldown=%v, WhoisTTL=%v, WhoisTimeout=%v, WhitelistPrefixes=%d",
-		cfg.Cooldown(), cfg.WhoisCacheTTL(), cfg.WhoisTimeout(), len(cfg.WhitelistCIDRs))
+	log.Printf("Configuration loaded: Cooldown=%v, WhoisTTL=%v, WhoisTimeout=%v, WhitelistPrefixes=%d, AbuseIPDB=%v",
+		cfg.Cooldown(), cfg.WhoisCacheTTL(), cfg.WhoisTimeout(), len(cfg.WhitelistCIDRs), cfg.AbuseIPDB.IsActive())
 
 	// 2. Initialize notifier
 	notif, err := notifier.NewDBusNotifier(cfg.Urgency)
@@ -59,7 +60,15 @@ func main() {
 		defer cancel()
 		log.Println("Sending test desktop notification...")
 		if notif != nil {
-			if err := notif.Notify(ctx, "203.0.113.45", "CN", "root", "China Telecom (AS4134)", 1); err != nil {
+			err := notif.Notify(ctx, notifier.Alert{
+				IP:           "203.0.113.45",
+				Country:      "CN",
+				User:         "root",
+				Org:          "China Telecom (AS4134)",
+				AbuseSummary: "100% confianza (42 reportes)",
+				Attempts:     1,
+			})
+			if err != nil {
 				log.Fatalf("Failed to send test notification: %v", err)
 			}
 		}
@@ -78,6 +87,23 @@ func main() {
 	// 5. WHOIS client with TTL cache & auto cleanup
 	whoisClient := whois.NewClient(cfg.WhoisTimeout(), cfg.WhoisCacheTTL(), nil)
 	whoisClient.StartAutoCleanup(ctx, 1*time.Hour)
+
+	// 5b. Optional AbuseIPDB client with TTL cache & auto cleanup
+	var abuseClient *abuseipdb.Client
+	if cfg.AbuseIPDB.IsActive() {
+		abuseClient = abuseipdb.NewClient(
+			cfg.AbuseIPDB.APIKey,
+			cfg.AbuseIPDB.MaxAgeInDays,
+			cfg.AbuseIPDB.Timeout(),
+			cfg.AbuseIPDB.CacheTTL(),
+			nil,
+		)
+		abuseClient.StartAutoCleanup(ctx, 1*time.Hour)
+		log.Printf("AbuseIPDB integration enabled (MaxAge=%dd, CacheTTL=%v, AutoReport=%v)",
+			cfg.AbuseIPDB.MaxAgeInDays, cfg.AbuseIPDB.CacheTTL(), cfg.AbuseIPDB.ReportEnabled)
+	} else if cfg.AbuseIPDB.Enabled {
+		log.Println("Warning: AbuseIPDB is enabled in config, but no API key was provided (config or ABUSEIPDB_API_KEY).")
+	}
 
 	// 6. Channel for log events
 	eventsChan := make(chan logwatcher.SSHEvent, 128)
@@ -137,17 +163,47 @@ eventLoop:
 				continue
 			}
 
-			// Asynchronous WHOIS lookup and Notification
+			// Asynchronous WHOIS + AbuseIPDB enrichment and Notification
 			alertWg.Add(1)
 			go func(event logwatcher.SSHEvent, totalAttempts int) {
 				defer alertWg.Done()
 
-				asyncCtx, asyncCancel := context.WithTimeout(context.Background(), cfg.WhoisTimeout()+3*time.Second)
+				enrichTimeout := cfg.WhoisTimeout()
+				if abuseClient != nil && cfg.AbuseIPDB.Timeout() > enrichTimeout {
+					enrichTimeout = cfg.AbuseIPDB.Timeout()
+				}
+				asyncCtx, asyncCancel := context.WithTimeout(context.Background(), enrichTimeout+3*time.Second)
 				defer asyncCancel()
 
-				info, err := whoisClient.Lookup(asyncCtx, event.IP)
-				if err != nil {
-					log.Printf("WHOIS query warning for %s: %v", event.IP, err)
+				var (
+					info     *whois.Info
+					whoisErr error
+					abuseRes *abuseipdb.CheckResult
+					abuseErr error
+					enrichWg sync.WaitGroup
+				)
+
+				enrichWg.Add(1)
+				go func() {
+					defer enrichWg.Done()
+					info, whoisErr = whoisClient.Lookup(asyncCtx, event.IP)
+				}()
+
+				if abuseClient != nil {
+					enrichWg.Add(1)
+					go func() {
+						defer enrichWg.Done()
+						abuseRes, abuseErr = abuseClient.Check(asyncCtx, event.IP)
+					}()
+				}
+
+				enrichWg.Wait()
+
+				if whoisErr != nil {
+					log.Printf("WHOIS query warning for %s: %v", event.IP, whoisErr)
+				}
+				if abuseErr != nil {
+					log.Printf("AbuseIPDB query warning for %s: %v", event.IP, abuseErr)
 				}
 
 				country := ""
@@ -157,12 +213,45 @@ eventLoop:
 					org = info.DisplayOrg()
 				}
 
-				log.Printf("INTRUSION DETECTED: IP=%s (%s), User=%s, Org=%s, Attempts=%d",
-					event.IP, country, event.User, org, totalAttempts)
+				abuseSummary := ""
+				if abuseRes != nil {
+					abuseSummary = abuseRes.FormatSummary()
+					if (country == "" || country == "??") && abuseRes.CountryCode != "" {
+						country = abuseRes.CountryCode
+					}
+					if org == "Desconocida" && abuseRes.ISP != "" {
+						org = abuseRes.ISP
+					}
+				}
+
+				if abuseSummary != "" {
+					log.Printf("INTRUSION DETECTED: IP=%s (%s), User=%s, Org=%s, AbuseIPDB=[%s], Attempts=%d",
+						event.IP, country, event.User, org, abuseSummary, totalAttempts)
+				} else {
+					log.Printf("INTRUSION DETECTED: IP=%s (%s), User=%s, Org=%s, Attempts=%d",
+						event.IP, country, event.User, org, totalAttempts)
+				}
 
 				if notif != nil {
-					if err := notif.Notify(asyncCtx, event.IP.String(), country, event.User, org, totalAttempts); err != nil {
+					err := notif.Notify(asyncCtx, notifier.Alert{
+						IP:           event.IP.String(),
+						Country:      country,
+						User:         event.User,
+						Org:          org,
+						AbuseSummary: abuseSummary,
+						Attempts:     totalAttempts,
+					})
+					if err != nil {
 						log.Printf("Error sending notification for %s: %v", event.IP, err)
+					}
+				}
+
+				if abuseClient != nil && cfg.AbuseIPDB.ReportEnabled && totalAttempts >= cfg.AbuseIPDB.ReportMinAttempts {
+					comment := fmt.Sprintf("SSH authentication failure for user %s (%d attempts detected by ssh-watch-gnome)", event.User, totalAttempts)
+					if sent, err := abuseClient.Report(asyncCtx, event.IP, comment); err != nil {
+						log.Printf("AbuseIPDB report warning for %s: %v", event.IP, err)
+					} else if sent {
+						log.Printf("Reported IP %s to AbuseIPDB (categories 18,22)", event.IP)
 					}
 				}
 			}(ev, attempts)

@@ -9,13 +9,40 @@ import (
 	"time"
 )
 
+// AbuseIPDBConfig holds optional settings for AbuseIPDB API v2 integration.
+type AbuseIPDBConfig struct {
+	Enabled           bool   `json:"enabled"`
+	APIKey            string `json:"api_key"`
+	MaxAgeInDays      int    `json:"max_age_in_days"`
+	CacheTTLHours     int    `json:"cache_ttl_hours"`
+	TimeoutSeconds    int    `json:"timeout_seconds"`
+	ReportEnabled     bool   `json:"report_enabled"`
+	ReportMinAttempts int    `json:"report_min_attempts"`
+}
+
+// IsActive returns true when AbuseIPDB integration is enabled and an API key is configured.
+func (a AbuseIPDBConfig) IsActive() bool {
+	return a.Enabled && a.APIKey != ""
+}
+
+// CacheTTL returns the cache TTL duration for AbuseIPDB lookup results.
+func (a AbuseIPDBConfig) CacheTTL() time.Duration {
+	return time.Duration(a.CacheTTLHours) * time.Hour
+}
+
+// Timeout returns the HTTP timeout duration for AbuseIPDB API requests.
+func (a AbuseIPDBConfig) Timeout() time.Duration {
+	return time.Duration(a.TimeoutSeconds) * time.Second
+}
+
 // Config holds runtime configuration options for ssh-watch-gnome.
 type Config struct {
-	CooldownSeconds     int      `json:"cooldown_seconds"`
-	WhoisCacheTTLHours  int      `json:"whois_cache_ttl_hours"`
-	WhoisTimeoutSeconds int      `json:"whois_timeout_seconds"`
-	Urgency             byte     `json:"urgency"`
-	WhitelistCIDRs      []string `json:"whitelist_cidrs"`
+	CooldownSeconds     int             `json:"cooldown_seconds"`
+	WhoisCacheTTLHours  int             `json:"whois_cache_ttl_hours"`
+	WhoisTimeoutSeconds int             `json:"whois_timeout_seconds"`
+	Urgency             byte            `json:"urgency"`
+	WhitelistCIDRs      []string        `json:"whitelist_cidrs"`
+	AbuseIPDB           AbuseIPDBConfig `json:"abuseipdb"`
 
 	parsedWhitelist []netip.Prefix `json:"-"`
 }
@@ -31,6 +58,15 @@ func DefaultConfig() *Config {
 			"127.0.0.1/32",
 			"::1/128",
 			"192.168.1.0/24",
+		},
+		AbuseIPDB: AbuseIPDBConfig{
+			Enabled:           false,
+			APIKey:            "",
+			MaxAgeInDays:      90,
+			CacheTTLHours:     24,
+			TimeoutSeconds:    4,
+			ReportEnabled:     false,
+			ReportMinAttempts: 3,
 		},
 	}
 	_ = cfg.parseCIDRs()
@@ -79,6 +115,21 @@ func Load(filePath string) (*Config, error) {
 	}
 	if cfg.WhoisTimeoutSeconds <= 0 {
 		cfg.WhoisTimeoutSeconds = 4
+	}
+	if cfg.AbuseIPDB.MaxAgeInDays < 1 || cfg.AbuseIPDB.MaxAgeInDays > 365 {
+		cfg.AbuseIPDB.MaxAgeInDays = 90
+	}
+	if cfg.AbuseIPDB.CacheTTLHours <= 0 {
+		cfg.AbuseIPDB.CacheTTLHours = 24
+	}
+	if cfg.AbuseIPDB.TimeoutSeconds <= 0 {
+		cfg.AbuseIPDB.TimeoutSeconds = 4
+	}
+	if cfg.AbuseIPDB.ReportMinAttempts <= 0 {
+		cfg.AbuseIPDB.ReportMinAttempts = 3
+	}
+	if cfg.AbuseIPDB.APIKey == "" {
+		cfg.AbuseIPDB.APIKey = os.Getenv("ABUSEIPDB_API_KEY")
 	}
 
 	if err := cfg.parseCIDRs(); err != nil {

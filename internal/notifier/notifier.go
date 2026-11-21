@@ -13,9 +13,19 @@ import (
 	"github.com/godbus/dbus/v5"
 )
 
+// Alert encapsulates the fields displayed in a desktop notification.
+type Alert struct {
+	IP           string
+	Country      string
+	User         string
+	Org          string
+	AbuseSummary string
+	Attempts     int
+}
+
 // Notifier defines the interface for emitting desktop notifications.
 type Notifier interface {
-	Notify(ctx context.Context, ip, country, user, org string, attempts int) error
+	Notify(ctx context.Context, alert Alert) error
 	Close() error
 }
 
@@ -27,13 +37,14 @@ type DBusNotifier struct {
 }
 
 // FormatNotification formats the summary and body with HTML/Pango escaping according to RF-05.
-func FormatNotification(ip, country, user, org string, attempts int) (summary, body string) {
+func FormatNotification(a Alert) (summary, body string) {
 	summary = "⚠️ Intento fallido de SSH"
 
-	safeIP := html.EscapeString(strings.TrimSpace(ip))
-	safeCountry := html.EscapeString(strings.TrimSpace(country))
-	safeUser := html.EscapeString(strings.TrimSpace(user))
-	safeOrg := html.EscapeString(strings.TrimSpace(org))
+	safeIP := html.EscapeString(strings.TrimSpace(a.IP))
+	safeCountry := html.EscapeString(strings.TrimSpace(a.Country))
+	safeUser := html.EscapeString(strings.TrimSpace(a.User))
+	safeOrg := html.EscapeString(strings.TrimSpace(a.Org))
+	safeAbuse := html.EscapeString(strings.TrimSpace(a.AbuseSummary))
 
 	var ipLine string
 	if safeCountry != "" && safeCountry != "??" {
@@ -46,8 +57,16 @@ func FormatNotification(ip, country, user, org string, attempts int) (summary, b
 		safeOrg = "Desconocida"
 	}
 
-	body = fmt.Sprintf("%s\nUsuario: %s\nOrganización: %s\nIntentos detectados: %d",
-		ipLine, safeUser, safeOrg, attempts)
+	var lines []string
+	lines = append(lines, ipLine)
+	lines = append(lines, fmt.Sprintf("Usuario: %s", safeUser))
+	lines = append(lines, fmt.Sprintf("Organización: %s", safeOrg))
+	if safeAbuse != "" {
+		lines = append(lines, fmt.Sprintf("AbuseIPDB: %s", safeAbuse))
+	}
+	lines = append(lines, fmt.Sprintf("Intentos detectados: %d", a.Attempts))
+
+	body = strings.Join(lines, "\n")
 
 	return summary, body
 }
@@ -66,8 +85,8 @@ func NewDBusNotifier(urgency byte) (*DBusNotifier, error) {
 }
 
 // Notify sends a notification via D-Bus, falling back to notify-send if D-Bus fails.
-func (n *DBusNotifier) Notify(ctx context.Context, ip, country, user, org string, attempts int) error {
-	summary, body := FormatNotification(ip, country, user, org, attempts)
+func (n *DBusNotifier) Notify(ctx context.Context, alert Alert) error {
+	summary, body := FormatNotification(alert)
 
 	n.mu.Lock()
 	conn := n.conn

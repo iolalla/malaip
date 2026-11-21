@@ -91,3 +91,49 @@ func TestLoadConfigFile(t *testing.T) {
 		t.Errorf("expected 192.168.0.2 NOT to be whitelisted")
 	}
 }
+
+func TestLoadAbuseIPDBConfigAndEnvFallback(t *testing.T) {
+	tempDir := t.TempDir()
+	confPath := filepath.Join(tempDir, "config.json")
+
+	content := `{
+		"abuseipdb": {
+			"enabled": true,
+			"max_age_in_days": 60,
+			"cache_ttl_hours": 12,
+			"timeout_seconds": 5,
+			"report_enabled": true,
+			"report_min_attempts": 5
+		}
+	}`
+
+	if err := os.WriteFile(confPath, []byte(content), 0644); err != nil {
+		t.Fatalf("failed to write temp config: %v", err)
+	}
+
+	t.Setenv("ABUSEIPDB_API_KEY", "env-secret-key")
+
+	cfg, err := Load(confPath)
+	if err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+
+	if !cfg.AbuseIPDB.IsActive() {
+		t.Fatalf("expected AbuseIPDB to be active with env fallback key")
+	}
+	if cfg.AbuseIPDB.APIKey != "env-secret-key" {
+		t.Errorf("expected APIKey from env, got %q", cfg.AbuseIPDB.APIKey)
+	}
+	if cfg.AbuseIPDB.MaxAgeInDays != 60 {
+		t.Errorf("expected MaxAgeInDays=60, got %d", cfg.AbuseIPDB.MaxAgeInDays)
+	}
+	if cfg.AbuseIPDB.CacheTTLHours != 12 {
+		t.Errorf("expected CacheTTLHours=12, got %d", cfg.AbuseIPDB.CacheTTLHours)
+	}
+	if cfg.AbuseIPDB.TimeoutSeconds != 5 {
+		t.Errorf("expected TimeoutSeconds=5, got %d", cfg.AbuseIPDB.TimeoutSeconds)
+	}
+	if !cfg.AbuseIPDB.ReportEnabled || cfg.AbuseIPDB.ReportMinAttempts != 5 {
+		t.Errorf("unexpected report config: %+v", cfg.AbuseIPDB)
+	}
+}
